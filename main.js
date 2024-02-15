@@ -5,8 +5,8 @@ const body = document.body,
     svgLabel = form.svg.parentNode,
     previewer = svgLabel.querySelector('img');
 
-let initTime;
-    
+let initTime, lastFrameNum;
+
 form.svg.onchange = function(event) {
     const [file] = form.svg.files;
     previewer.src = URL.createObjectURL(file);
@@ -39,15 +39,37 @@ form.onsubmit = function (event) {
             duration: parseInt(form.duration.value || form.duration.placeholder),
             framerate: parseInt(form.framerate.value || form.framerate.placeholder),
             background: form.background.value
-        }).then(function(blob) {
-            const generatedFile = new File([new Blob([blob], {type: 'application/octet-stream'})], file.name.replace(/\.svgz?$/i, '.webm'));
-            const a = document.createElement('a');
-            a.download = generatedFile.name;
-            a.href = URL.createObjectURL(generatedFile);
-            a.dataset.downloadurl = [generatedFile.type, a.download, a.href].join(':');
-            const mouseEvent = document.createEvent('MouseEvents');
-            mouseEvent.initMouseEvent('click', true, false, window, 0, 0, 0, 0, 0, false, false, false, false, 0, null);
-            a.dispatchEvent(mouseEvent);
+        }).then(function(blobs) {
+            // Create a new instance of JSZip
+            const zip = new JSZip();
+
+            let droppedFrames = 0;
+            let lastFrame = null;
+
+            // Iterate over the array of PNG blobs
+            for (let i = 0; i < blobs.length; i++) {
+                // Create a new file name for each PNG image
+                const fileName = `${i}.png`;
+
+                if (typeof(blobs[i]) !== 'undefined') {
+                    // Add the PNG blob to the zip file
+                    lastFrame = dataURItoBlob(blobs[i]);
+                    zip.file(fileName, lastFrame);
+                }
+                else {
+                    zip.file(fileName, lastFrame);
+                    droppedFrames++;
+                }
+
+            }
+
+            console.log("Dropped frames:", droppedFrames);
+
+            // Generate the zip file asynchronously
+            zip.generateAsync({ type: "blob" }).then(function (content) {
+                // Save the zip file using saveMe
+                saveAs(content, file.name.replace(/\.svgz?$/i, '.zip'));
+            });
         });
     }
 
@@ -136,6 +158,31 @@ function checkPositifInt(val) {
     return /^[1-9]\d*$/.test(val);
 }
 
+function dataURItoBlob(dataURI) {
+    // convert base64 to raw binary data held in a string
+    // doesn't handle URLEncoded DataURIs - see SO answer #6850276 for code that does this
+    var byteString = atob(dataURI.split(',')[1]);
+
+    // separate out the mime component
+    var mimeString = dataURI.split(',')[0].split(':')[1].split(';')[0]
+
+    // write the bytes of the string to an ArrayBuffer
+    var ab = new ArrayBuffer(byteString.length);
+
+    // create a view into the buffer
+    var ia = new Uint8Array(ab);
+
+    // set the bytes of the buffer to the correct values
+    for (var i = 0; i < byteString.length; i++) {
+        ia[i] = byteString.charCodeAt(i);
+    }
+
+    // write the ArrayBuffer to a blob, and you're done
+    var blob = new Blob([ab], {type: mimeString});
+    return blob;
+
+  }
+
 /**
  * Start recording with the given options
  * @param {any} options Recording options
@@ -144,19 +191,18 @@ function checkPositifInt(val) {
 function startRecord(options) {
     return new Promise(function(resolve, reject) {
         console.log('startRecord', options);
-        if (body.className) 
+        if (body.className)
             return reject(new Error("It's already recording"));
-        
+
         body.className = 'recording';
         // create image, canvas and recorder
         const image = document.createElement('img'),
             canvas = document.createElement('canvas'),
             ctx = canvas.getContext('2d'),
-            chunks = [],
-            stream = canvas.captureStream(options.framerate),
-            recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+            frames = [];
 
         initTime = null;
+        lastFrameNum = -1;
 
         canvas.width = image.width = options.width;
         canvas.height = image.height = options.height;
@@ -165,27 +211,10 @@ function startRecord(options) {
         body.appendChild(image);
         body.appendChild(canvas);
 
-        recorder.ondataavailable = function(event) {
-            const blob = event.data;
-            if (blob && blob.size) { 
-                chunks.push(blob); 
-            }
-        };
-
-        recorder.onstop = function(event) {
-            // remove temp components
-            body.removeChild(image);
-            body.removeChild(canvas);
-
-            body.className = '';
-
-            resolve(new Blob(chunks, { type: "video/webm" }));
-        };
-
         // on image loaded start recording
         image.onload = function(event) {
-            // Start recording
-            renderLoop();
+            // Start capturing frames
+            requestAnimationFrame(renderLoop);
         }
         image.src = options.url;
 
@@ -194,19 +223,23 @@ function startRecord(options) {
          * @param {number} time The loop time
          */
         function renderLoop(time) {
-            render();
-            if (initTime==null) {
+            if (initTime == null) {
                 // First call
-                if (!time)
-                    recorder.start();
-                else
-                    initTime = time; 
-            }
-            else if (time - initTime > options.duration) {
-                // stop recording after defined duration
-                recorder.stop();
+                initTime = time;
+            } else if (time - initTime >= options.duration) {
+                // stop capturing frames after defined duration
+                resolve(frames);
                 return;
             }
+
+            const currentFrameNum = Math.floor((time - initTime) / 1000 * options.framerate);
+            if (currentFrameNum > lastFrameNum) {
+                render();
+                const frame = canvas.toDataURL("image/png");
+                frames[currentFrameNum] = frame;
+                lastFrameNum = currentFrameNum;
+            }
+
             requestAnimationFrame(renderLoop);
         }
 
